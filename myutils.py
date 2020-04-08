@@ -11,6 +11,7 @@ import editdistance
 import numpy as np
 import pandas as pd
 import tensorflow as tf
+from jiwer import wer
 
 FREQ = 16000
 
@@ -109,9 +110,9 @@ class AudioTextGenerator(tf.keras.callbacks.Callback):
             'label_length': np.array(label_length)[:,np.newaxis],
             'source_str': np.array(source_str)
         }
-        # outputs = {'ctc': np.zeros([size])}
+        outputs = {'ctc': np.zeros([size])}
         #print("{:.2f}s".format(time.time() - start_time))
-        return (inputs, np.zeros([size]))
+        return (inputs, outputs)
 
     # function called in training
     def next_batch(self):
@@ -137,7 +138,7 @@ class AudioTextGenerator(tf.keras.callbacks.Callback):
         pass
 
     def on_epoch_begin(self, epoch, logs={}):
-        pass
+        self.data = self.data.sample(frac=1, random_state=self.shuffle_random_state).reset_index(drop=True) # shuffle data
 
 # ctc function
 def ctc_lambda_func(args):
@@ -168,33 +169,34 @@ class ValCallback(tf.keras.callbacks.Callback):
         if not os.path.exists(ckpt_path):
             os.makedirs(ckpt_path)
     
-    def show_edit_distance(self, num):
-        num_left = num
-        mean_norm_ed = 0.0
-        mean_ed = 0.0
-        while num_left > 0:
-            word_batch = next(self.next_val)
-            num_proc = min(word_batch['the_input'].shape[0], num_left)
-            decoded_res = decode_batch(self.test_func,
-                                       word_batch['the_input'][0:num_proc])
-            for j in range(num_proc):
-                edit_dist = editdistance.eval(decoded_res[j],
-                                              word_batch['source_str'][j])
-                mean_ed += float(edit_dist)
-                mean_norm_ed += float(edit_dist) / len(word_batch['source_str'][j])
-            num_left -= num_proc
-        mean_norm_ed = mean_norm_ed / num
-        mean_ed = mean_ed / num
-        print('\nOut of %d samples:  Mean edit distance:'
-              '%.3f Mean normalized edit distance: %0.3f'
-              % (num, mean_ed, mean_norm_ed))
+    #def show_edit_distance(self, num):
+    #    num_left = num
+    #    mean_norm_ed = 0.0
+    #    mean_ed = 0.0
+    #    while num_left > 0:
+    #        word_batch = next(self.next_val)
+    #        num_proc = min(word_batch['the_input'].shape[0], num_left)
+    #        decoded_res = decode_batch(self.test_func,
+    #                                   word_batch['the_input'][0:num_proc])
+    #        for j in range(num_proc):
+    #            edit_dist = editdistance.eval(decoded_res[j],
+    #                                          word_batch['source_str'][j])
+    #            mean_ed += float(edit_dist)
+    #            mean_norm_ed += float(edit_dist) / len(word_batch['source_str'][j])
+    #        num_left -= num_proc
+    #    mean_norm_ed = mean_norm_ed / num
+    #    mean_ed = mean_ed / num
+    #    print('\nOut of %d samples:  Mean edit distance:'
+    #          '%.3f Mean normalized edit distance: %0.3f'
+    #          % (num, mean_ed, mean_norm_ed))
 
     def on_epoch_end(self, epoch, logs={}):
         self.model.save_weights(
             os.path.join(self.ckpt_path, 'weights%02d.h5' % (epoch)))
         #self.show_edit_distance(50)
         word_batch = next(self.next_val)[0]
-        res = decode_batch(self.test_func, word_batch['the_input'][:self.num_display])
+        res = decode_batch(self.test_func, word_batch['the_input'])
         print()
         for i in range(self.num_display):
             print("Truth = {}\nDecoded = {}".format(word_batch["source_str"][i], res[i]))
+        print("WER: {}".format(wer(word_batch["source_str"].tolist(), res)))
