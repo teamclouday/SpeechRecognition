@@ -1,3 +1,5 @@
 *.zip
 **ipynb_**
 *.flac
+*.wav
+**pycache**

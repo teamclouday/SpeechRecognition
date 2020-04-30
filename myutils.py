@@ -4,6 +4,7 @@
 import os
 import math
 import time
+import random
 import pickle
 import librosa
 import itertools
@@ -12,8 +13,11 @@ import numpy as np
 import pandas as pd
 import tensorflow as tf
 from jiwer import wer
+from tensorflow.python.ops import ctc_ops as ctc
 
 FREQ = 16000
+HOP = 160 # 10ms
+WINDOW = 400 # 25ms
 
 # Text data preprocessing functions
 CHAR_LIST = "".join([" "] + [chr(x) for x in range(65, 91)] + ["'"])
@@ -42,6 +46,7 @@ class AudioTextGenerator(tf.keras.callbacks.Callback):
                  batch_size, max_audio_length,
                  feature_height,
                  # val_split,
+                 data_augment=False,
                  shuffle_random_state=None,
                  max_text_length=None,
                  feature_choice="mfcc"):
@@ -51,7 +56,7 @@ class AudioTextGenerator(tf.keras.callbacks.Callback):
         print("AudioTextGenerator: self.data.shape = {}".format(self.data.shape))
         self.shuffle_random_state = shuffle_random_state
         self.batch_size = batch_size
-        self.max_audio_length = math.ceil(max_audio_length * FREQ / 512)
+        self.max_audio_length = math.ceil(max_audio_length * FREQ / HOP) + 5 # slightly longer than ground truth
         self.feature_height = feature_height
         self.feature_choice = feature_choice
         #assert val_split < 0.5
@@ -64,6 +69,7 @@ class AudioTextGenerator(tf.keras.callbacks.Callback):
             self.max_text_length = self.data["Text"].str.len().max()
         else:
             self.max_text_length = max_text_length
+        self.data_augment = data_augment
 
     # generate text labels for each batch
     # returns padded data, and actual sequence length
@@ -72,7 +78,7 @@ class AudioTextGenerator(tf.keras.callbacks.Callback):
         Y_text_source = self.data["Text"].iloc[index_list].copy().to_list()
         Y_text = [text_to_label(x) for x in Y_text_source]
         sequence_length = [len(x) for x in Y_text]
-        Y_data = tf.keras.preprocessing.sequence.pad_sequences(Y_text, padding="post", maxlen=self.max_text_length)
+        Y_data = tf.keras.preprocessing.sequence.pad_sequences(Y_text, maxlen=self.max_text_length, padding="post", truncating='post')
         return (Y_data, sequence_length, Y_text_source)
     
     # generate audio data for each batch
@@ -84,13 +90,31 @@ class AudioTextGenerator(tf.keras.callbacks.Callback):
         for path in X_path:
             with open(path, "rb") as inFile:
                 X_data.append(pickle.load(inFile))
+        if self.data_augment:
+            X_data = [(self._audio_augment(a), b) for (a, b) in X_data]
         if self.feature_choice == "mfcc":
-            X_data = [librosa.feature.mfcc(y=a, sr=b, n_mfcc=self.feature_height).T for (a, b) in X_data]
+            X_data = [librosa.feature.mfcc(y=a, sr=b, n_mfcc=self.feature_height, hop_length=HOP, n_fft=WINDOW).T for (a, b) in X_data]
             sequence_length = [x.shape[0] for x in X_data]
         else:
-            X_data = [librosa.feature.melspectrogram(y=a, sr=b, n_mels=self.feature_height).T for (a, b) in X_data]
+            X_data = [librosa.feature.melspectrogram(y=a, sr=b, n_mels=self.feature_height, hop_length=HOP, n_fft=WINDOW).T for (a, b) in X_data]
             sequence_length = [x.shape[0] for x in X_data]
-        return (tf.keras.preprocessing.sequence.pad_sequences(X_data, maxlen=self.max_audio_length, padding="post"), sequence_length)
+        return (tf.keras.preprocessing.sequence.pad_sequences(X_data, maxlen=self.max_audio_length, padding='post', truncating='post'), sequence_length)
+        # return (tf.keras.preprocessing.sequence.pad_sequences(X_data, maxlen=self.max_audio_length), sequence_length)
+    
+    # perform audio data augmentation
+    # add around 2.2 seconds for every batch data with batch size = 256
+    def _audio_augment(self, wav):
+        new_wav = wav.copy()
+        if random.randint(1, 100) <= 50: # 50% possibility of noise
+            noise = np.random.randn(len(wav)) * np.random.uniform(0.005, 0.03)
+            new_wav = (noise + new_wav).astype(wav.dtype)
+            new_rnd = random.randint(1, 100)
+            if new_rnd <= 20: # 10% possibility of using more methods
+                if new_rnd <= 5: # 2.5% possibility of pitch change
+                    new_wav = librosa.effects.pitch_shift(new_wav, 16000, np.random.uniform(0.5, 2.0))
+                else: # 7.5% possibility of speech change
+                    new_wav = librosa.effects.time_stretch(new_wav, np.random.uniform(1.0, 1.5))
+        return new_wav
     
     # helper function to get a batch
     # either for training or validation
@@ -104,15 +128,15 @@ class AudioTextGenerator(tf.keras.callbacks.Callback):
         X_data, input_length = self.prepare_audio(index_list)
         Y_data, label_length, source_str = self.prepare_labels(index_list)
         inputs = {
-            'the_input': X_data[:,:,:,np.newaxis],
+            'the_input': X_data,
             'the_labels': np.array(Y_data, dtype=np.float32),
             'input_length': np.array(input_length)[:,np.newaxis],
             'label_length': np.array(label_length)[:,np.newaxis],
             'source_str': np.array(source_str)
         }
-        outputs = {'ctc': np.zeros([size])}
+        # outputs = {'ctc': np.zeros([size])}
         #print("{:.2f}s".format(time.time() - start_time))
-        return (inputs, outputs)
+        return (inputs, np.zeros([size]))
 
     # function called in training
     def next_batch(self):
@@ -144,7 +168,16 @@ class AudioTextGenerator(tf.keras.callbacks.Callback):
 def ctc_lambda_func(args):
     y_pred, labels, input_length, label_length = args
     y_pred = y_pred[:, 2:, :]
-    return tf.keras.backend.ctc_batch_cost(labels, y_pred, input_length, label_length)
+    
+    label_length = tf.cast(tf.squeeze(label_length, axis=-1), tf.int32)
+    input_length = tf.cast(tf.squeeze(input_length, axis=-1), tf.int32)
+    sparse_labels = tf.cast(tf.keras.backend.ctc_label_dense_to_sparse(labels, label_length), tf.int32)
+    y_pred = tf.math.log(tf.transpose(y_pred, perm=[1, 0, 2]) + tf.keras.backend.epsilon())
+    return tf.expand_dims(ctc.ctc_loss(inputs=y_pred,
+                                       labels=sparse_labels,
+                                       sequence_length=input_length,
+                                       ignore_longer_outputs_than_inputs=True), 1) # set to True to skip the exceptional cases
+    #return tf.keras.backend.ctc_batch_cost(labels, y_pred, input_length, label_length)
 
 # For a real OCR application, this should be beam search with a dictionary
 # and language model.  For this example, best path is sufficient.
@@ -195,7 +228,7 @@ class ValCallback(tf.keras.callbacks.Callback):
             os.path.join(self.ckpt_path, 'weights%02d.h5' % (epoch)))
         #self.show_edit_distance(50)
         word_batch = next(self.next_val)[0]
-        res = decode_batch(self.test_func, word_batch['the_input'])
+        res = decode_batch(self.test_func, word_batch['the_input'][0:self.num_display])
         print()
         for i in range(self.num_display):
             print("Truth = {}\nDecoded = {}".format(word_batch["source_str"][i], res[i]))
