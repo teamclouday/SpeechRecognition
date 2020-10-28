@@ -1,7 +1,8 @@
 # Speech Recognition  
 
+__This project is temporarily suspended. I'll come back after I learned more advanced and necessary knowledge__  
+
 I'm trying to build an ASR model with tensorflow 2.1 in this project  
-May take a long time  
 
 ------
 
